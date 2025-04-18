@@ -4,6 +4,8 @@ import itertools
 import os
 import cv2
 import mediapipe as mp
+import numpy as np
+from pathlib import Path
 
 def encode_label(label_name,category):
     for i in category:
@@ -26,45 +28,66 @@ def calc_landmark_list(image, landmarks):
     return landmark_point
 
 
-def pre_process_landmark(landmark_list):
+def pre_process_landmark_revised(landmark_list):
     temp_landmark_list = copy.deepcopy(landmark_list)
 
-    # Convert to relative coordinates
-    base_x, base_y = 0, 0
-    for index, landmark_point in enumerate(temp_landmark_list):
-        if index == 0:
-            base_x, base_y = landmark_point[0], landmark_point[1]
+    # 1. Translate relative to a stable point (e.g., nose tip - index 1)
+    if not temp_landmark_list:
+        return []
+        
+    base_x, base_y = temp_landmark_list[1][0], temp_landmark_list[1][1]
 
-        temp_landmark_list[index][0] = temp_landmark_list[index][0] - base_x
-        temp_landmark_list[index][1] = temp_landmark_list[index][1] - base_y
+    for landmark_point in temp_landmark_list:
+        landmark_point[0] -= base_x
+        landmark_point[1] -= base_y
 
-    # Convert to a one-dimensional list
-    temp_landmark_list = list(
-        itertools.chain.from_iterable(temp_landmark_list))
+    # 2. Calculate scale factor (e.g., inter-ocular distance)
+    # Use coordinates *after* translation for scale calculation as well
+    p1 = temp_landmark_list[263] # Left eye outer corner
+    p2 = temp_landmark_list[33]  # Right eye outer corner
+    
+    # Add small epsilon to prevent division by zero
+    scale_factor = np.linalg.norm(np.array(p1) - np.array(p2)) + 1e-6 
 
-    # Normalization
-    max_value = max(list(map(abs, temp_landmark_list)))
+    # 3. Normalize coordinates by the scale factor
+    normalized_landmarks = []
+    for landmark_point in temp_landmark_list:
+        normalized_landmarks.append(landmark_point[0] / scale_factor)
+        normalized_landmarks.append(landmark_point[1] / scale_factor)
+        
+    # 4. Flattening is already done by appending x, y sequentially
 
-    def normalize_(n):
-        return n / max_value
-
-    temp_landmark_list = list(map(normalize_, temp_landmark_list))
-
-    return temp_landmark_list
+    return normalized_landmarks
 
 
 def logging_csv(number, landmark_list):
-    if 0 <= number <= 5:
-        csv_path = 'model/keypoint_classifier/keypoint.csv'
-        with open(csv_path, 'a', newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([number, *landmark_list])
+    assert isinstance(number, int)
+    # Empty data if it already exists
+    with open(csv_path, 'a', newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([number, *landmark_list])
     return
 
 
-root = "Your dataset dir"
+# root = "dataset/FER-2013/train"
+# root = "dataset/CK+48"
+# root = "dataset/affectnet"
+root="dataset/jaffe/reorganized"
+
+csv_path = 'model/keypoint_classifier/keypoint.csv'
+# Clear existing data
+with open(csv_path, 'w', newline="") as f:
+    pass
+
 IMAGE_FILES = []
-category = ['Anger','Happy','Neutral','Sad','Surprise']
+# category = ['angry','happy','neutral','sad','surprise', 'disgust', 'fear']
+# category = ['anger','contempt','disgust','fear','happy','neutral','sad','surprise']
+category=[]
+for item in Path(root).iterdir():
+    if item.is_dir():
+        category.append(item.name)
+
+
 for path, subdirs, files in os.walk(root):
     for name in files:
         IMAGE_FILES.append(os.path.join(path, name))
@@ -80,10 +103,16 @@ face_mesh = mp_face_mesh.FaceMesh(
 
 
 for idx, file in enumerate(IMAGE_FILES):
-    label_name = file.rsplit("/",1)[-1]
-    label_name = label_name.rsplit("\\",1)[0]
+    parent_dir = os.path.dirname(file)
+    label_name = os.path.basename(parent_dir)
     label = encode_label(label_name,category)
     image = cv2.imread(file)
+    
+    # Check if image was loaded successfully
+    if image is None:
+        print(f"Warning: Could not read image file {file}. Skipping.")
+        continue # Skip to the next file
+
     image = cv2.flip(image, 1)  # Mirror display
     debug_image = copy.deepcopy(image)
 
@@ -99,7 +128,7 @@ for idx, file in enumerate(IMAGE_FILES):
             landmark_list = calc_landmark_list(debug_image, face_landmarks)
 
             # Conversion to relative coordinates / normalized coordinates
-            pre_processed_landmark_list = pre_process_landmark(
+            pre_processed_landmark_list = pre_process_landmark_revised(
                 landmark_list)
             # Write to the dataset file
             logging_csv(label, pre_processed_landmark_list)
